@@ -12,6 +12,7 @@ const COPY_AS_IS = [
   'node_modules', 'dist', 'auth_info', '.env',
   'package.json', 'package-lock.json', 'railway.json',
   '.gitignore', '.env.example', 'README.md',
+  'build-protected.js',
 ];
 
 const OBFUSCATOR_OPTIONS = [
