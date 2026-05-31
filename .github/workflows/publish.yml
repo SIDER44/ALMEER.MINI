@@ -16,7 +16,7 @@ jobs:
           node-version: '20'
 
       - name: Install dependencies
-        run: npm install && npm install javascript-obfuscator --save-dev
+        run: npm install && npm install -g javascript-obfuscator
 
       - name: Build obfuscated dist
         run: node build-protected.js
