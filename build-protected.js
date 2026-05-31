@@ -15,28 +15,29 @@ const COPY_AS_IS = [
   'build-protected.js',
 ];
 
+// ESM-safe obfuscator options (self-defending breaks ESM imports)
 const OBFUSCATOR_OPTIONS = [
   '--compact true',
   '--control-flow-flattening true',
-  '--control-flow-flattening-threshold 0.75',
+  '--control-flow-flattening-threshold 0.5',
   '--dead-code-injection true',
-  '--dead-code-injection-threshold 0.4',
+  '--dead-code-injection-threshold 0.3',
   '--identifier-names-generator hexadecimal',
   '--rename-globals false',
-  '--self-defending true',
+  '--self-defending false',
   '--string-array true',
-  '--string-array-encoding rc4',
   '--string-array-threshold 0.75',
-  '--unicode-escape-sequence false',
+  '--unicode-escape-sequence true',
   '--target node',
+  '--source-map false',
 ].join(' ');
 
-function walkJS(dir, rootOnly = false) {
+function walkJS(dir) {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     if (COPY_AS_IS.includes(entry.name)) continue;
-    if (entry.isDirectory() && !rootOnly) out.push(...walkJS(full));
+    if (entry.isDirectory()) out.push(...walkJS(full));
     else if (entry.isFile() && entry.name.endsWith('.js')) out.push(full);
   }
   return out;
@@ -56,11 +57,9 @@ function copyDir(src, dest) {
   }
 }
 
-// Clean and recreate dist
 if (fs.existsSync(DIST_DIR)) fs.rmSync(DIST_DIR, { recursive: true });
 ensureDir(DIST_DIR);
 
-// Copy static assets
 const COPY_ITEMS = [
   'package.json', 'package-lock.json', 'railway.json',
   '.gitignore', '.env.example', 'public', 'LICENSE',
@@ -75,16 +74,17 @@ for (const item of COPY_ITEMS) {
   else { ensureDir(path.dirname(dest)); fs.copyFileSync(src, dest); }
 }
 
-// Collect ALL JS files including root level
+// Collect all JS files
 const jsFiles = walkJS(SRC_DIR);
 
-// Make sure root level index.js is included
+// Force include root index.js
 const rootJs = path.join(SRC_DIR, 'index.js');
 if (fs.existsSync(rootJs) && !jsFiles.includes(rootJs)) {
   jsFiles.push(rootJs);
 }
 
 let obfCount = 0;
+let failCount = 0;
 
 for (const file of jsFiles) {
   const rel  = path.relative(SRC_DIR, file);
@@ -92,17 +92,21 @@ for (const file of jsFiles) {
   ensureDir(path.dirname(dest));
 
   try {
-    execSync(
+    const result = execSync(
       `javascript-obfuscator "${file}" --output "${dest}" ${OBFUSCATOR_OPTIONS}`,
-      { stdio: 'pipe' }
+      { stdio: 'pipe', encoding: 'utf8' }
     );
     console.log(`✔  obfuscated  ${rel}`);
     obfCount++;
   } catch (e) {
+    // Log the actual error so we can debug
+    console.error(`✘  FAILED  ${rel}`);
+    console.error(`   Error: ${e.stderr || e.message}`);
     fs.copyFileSync(file, dest);
-    console.warn(`⚠  copy-only   ${rel}  (obfuscator failed): ${e.message}`);
+    failCount++;
   }
 }
 
 console.log(`\n✅  Build complete → ${DIST_DIR}`);
 console.log(`   Obfuscated: ${obfCount} / ${jsFiles.length} JS files`);
+console.log(`   Failed: ${failCount} files (copied as-is)`);
