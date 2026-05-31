@@ -31,12 +31,12 @@ const OBFUSCATOR_OPTIONS = [
   '--target node',
 ].join(' ');
 
-function walkJS(dir) {
+function walkJS(dir, rootOnly = false) {
   const out = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
     const full = path.join(dir, entry.name);
     if (COPY_AS_IS.includes(entry.name)) continue;
-    if (entry.isDirectory()) out.push(...walkJS(full));
+    if (entry.isDirectory() && !rootOnly) out.push(...walkJS(full));
     else if (entry.isFile() && entry.name.endsWith('.js')) out.push(full);
   }
   return out;
@@ -56,9 +56,11 @@ function copyDir(src, dest) {
   }
 }
 
+// Clean and recreate dist
 if (fs.existsSync(DIST_DIR)) fs.rmSync(DIST_DIR, { recursive: true });
 ensureDir(DIST_DIR);
 
+// Copy static assets
 const COPY_ITEMS = [
   'package.json', 'package-lock.json', 'railway.json',
   '.gitignore', '.env.example', 'public', 'LICENSE',
@@ -73,7 +75,15 @@ for (const item of COPY_ITEMS) {
   else { ensureDir(path.dirname(dest)); fs.copyFileSync(src, dest); }
 }
 
+// Collect ALL JS files including root level
 const jsFiles = walkJS(SRC_DIR);
+
+// Make sure root level index.js is included
+const rootJs = path.join(SRC_DIR, 'index.js');
+if (fs.existsSync(rootJs) && !jsFiles.includes(rootJs)) {
+  jsFiles.push(rootJs);
+}
+
 let obfCount = 0;
 
 for (const file of jsFiles) {
