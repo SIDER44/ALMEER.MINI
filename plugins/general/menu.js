@@ -3,7 +3,7 @@
  * © 2026 ALMEER / SIDER44 (github.com/SIDER44). All rights reserved.
  * Unauthorized redistribution or rebranding is prohibited. See LICENSE.
  */
-import fs from 'fs';
+import fetch from 'node-fetch';
 
 // Cypher-X inspired menu
 export default {
@@ -45,10 +45,11 @@ export default {
 
     body += '\n> ⚡ _Powered by Almeer Mini_';
 
+    // Use URL logo — no local file needed, keeps repo lean
     try {
-      if (fs.existsSync(LOGO_PATH)) {
-        const buf = fs.readFileSync(LOGO_PATH);
-        return sock.sendMessage(chat, { image: buf, caption: body }, { quoted: m });
+      const isUrl = typeof LOGO_PATH === 'string' && LOGO_PATH.startsWith('http');
+      if (isUrl) {
+        return sock.sendMessage(chat, { image: { url: LOGO_PATH }, caption: body }, { quoted: m });
       }
     } catch {}
     return reply(body);
