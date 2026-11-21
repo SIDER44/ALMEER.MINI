@@ -140,6 +140,7 @@ const logger = pino({ level: 'silent' });
 let sock = null;
 let settings = loadSettings();
 let ownerJid = null;
+let ownerLid = null;   // WhatsApp now addresses accounts by LID too; the owner must match either form
 const startedAt = Date.now();
 printBrandBanner(chalk); // ALMEER brand lock — do not remove
 let reconnectAttempt = 0;
@@ -252,6 +253,39 @@ async function askNumberCLI() {
   });
 }
 
+
+// ─── single-instance guard
+// Two copies of the bot sharing one session (e.g. an old Railway deployment still running next to the new one, or two
+// replicas on the same Volume) corrupt WhatsApp's encryption state: every command is answered by several copies and the
+// phone shows "Waiting for this message" for the ones it cannot decrypt. A heartbeat lock inside AUTH_DIR keeps it to one.
+const LOCK_FILE = path.join(AUTH_DIR, '.instance.lock');
+const INSTANCE_ID = `${process.pid}-${Math.random().toString(36).slice(2, 10)}`;
+const LOCK_STALE_MS = 25_000;
+function readLock() { try { return JSON.parse(fs.readFileSync(LOCK_FILE, 'utf8')); } catch { return null; } }
+function writeLock() {
+  try { fs.mkdirSync(AUTH_DIR, { recursive: true }); fs.writeFileSync(LOCK_FILE, JSON.stringify({ id: INSTANCE_ID, ts: Date.now() })); } catch {}
+}
+async function acquireInstanceLock() {
+  const started = Date.now();
+  for (;;) {
+    const l = readLock();
+    const held = l && l.id !== INSTANCE_ID && Date.now() - l.ts < LOCK_STALE_MS;
+    if (!held) break;
+    if (Date.now() - started > 120_000) { log.warn('other instance still alive after 2 min — taking over (it will shut itself down).'); break; }
+    log.warn('another ALMEER instance is using this session — waiting for it to stop...');
+    await sleep(5_000);
+  }
+  writeLock();
+  setInterval(() => {
+    const l = readLock();
+    if (l && l.id !== INSTANCE_ID && Date.now() - l.ts < LOCK_STALE_MS) {
+      log.err('a newer instance took over this session — shutting this one down to avoid duplicate replies.');
+      process.exit(1);
+    }
+    writeLock();
+  }, 10_000).unref();
+}
+
 async function getMessage(key) {
   const m = getCachedMessage(key.remoteJid, key.id);
   if (m?.message) return m.message;
@@ -278,7 +312,7 @@ async function startSock() {
     defaultQueryTimeoutMs: 120_000,
     keepAliveIntervalMs: 15_000,
     markOnlineOnConnect: settings.alwaysOnline,
-    generateHighQualityLinkPreview: true,
+    generateHighQualityLinkPreview: false,   // off: building previews added seconds to replies containing links
     syncFullHistory: false,
     shouldIgnoreJid: () => false,
     getMessage,
@@ -304,6 +338,8 @@ async function startSock() {
       reconnectAttempt = 0;
       const me = sock.authState.creds?.me?.id;
       if (me) ownerJid = jidNormalizedUser(me);
+      const meLid = sock.authState.creds?.me?.lid || sock.user?.lid;
+      if (meLid) ownerLid = jidNormalizedUser(meLid);
       enforceBrandLock(sock, ownerJid, log).catch(() => {}); // ALMEER brand protection
       printConnectedBanner(ownerJid, version);
       log.ok('Connected as', chalk.green(ownerJid || 'unknown'));
@@ -411,7 +447,8 @@ function stopAlwaysOnline() {
 // ─── helpers
 function isOwner(jid) {
   if (!ownerJid || !jid) return false;
-  return jidNormalizedUser(jid) === ownerJid;
+  const n = jidNormalizedUser(jid);
+  return n === ownerJid || (!!ownerLid && n === ownerLid);
 }
 function getText(m) {
   return extractTextFromContent(m.message);
@@ -986,6 +1023,7 @@ async function handleViewOnceTarget(target, triggerMessage, quotedMessage) {
   if (process.env.OWNER_NUMBER) log.info('OWNER_NUMBER detected — auto-pair mode (pairing code will print below).');
   await loadPlugins(log);
   await startWebServer();
+  await acquireInstanceLock();
   await startSock();
 })();
 

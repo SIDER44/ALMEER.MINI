@@ -12,3 +12,14 @@ registry.npmjs.org and libsignal now uses git+https. Verified: `npm ci` and `npm
 * Reconnect after pairing succeeds (515) is a fast 3s retry.
 * `plugins/fun/8ball.js` syntax error fixed (all 89 plugins load now).
 * Optional: add a Railway Volume at /data and set AUTH_DIR=/data/auth_info so the session survives redeploys.
+
+# v3: duplicate-instance guard + retry fix
+* getMessage returns undefined for unknown messages (an empty message left the phone on "Waiting for this message").
+* Heartbeat lock in AUTH_DIR: a second copy of the bot on the same session waits, and an old one shuts itself down, so commands are answered once. Several "Waiting for this message" entries after every command usually means several copies are replying.
+
+# v4: Baileys 6.7.23 -> 7.0.0-rc14 (same as RIOT)
+* ALMEER was pinned to the legacy 6.x line (^6.7.9) although its own code already uses 7.x LID APIs (signalRepository.lidMapping, participantAlt). 6.x does not handle WhatsApp's LID addressing, which shows up as "Waiting for this message" on the phone for everything the bot sends.
+* package.json now pins 7.0.0-rc14; lockfile regenerated (no git/ssh dependency any more).
+* Owner check now matches both the phone-number JID and the LID.
+* Link previews off (faster replies).
+* After deploying: unlink old devices in WhatsApp, delete auth_info (or use a new AUTH_DIR), pair once.
