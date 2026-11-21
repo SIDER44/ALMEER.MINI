@@ -147,7 +147,53 @@ let alwaysOnlineTimer = null;
 let lastStatusSeen = null;
 let lastStatusReact = { ok: false, at: 0, detail: 'not attempted yet' };
 
-const AUTH_DIR = path.resolve('auth_info');
+const AUTH_DIR = path.resolve(process.env.AUTH_DIR || 'auth_info');   // on Railway: mount a Volume and set AUTH_DIR=/data/auth_info so the session survives redeploys
+
+// ─── permanent linked-device identity: Google Chrome on Ubuntu (same as Baileys' Browsers.ubuntu('Chrome'))
+const BROWSER = ['Ubuntu', 'Chrome', '22.04.4'];
+
+// ─── RIOT-style pairing flow
+// One code per socket: pressing "generate" twice (or a second caller) gets the SAME code instead of
+// invalidating the first one. The request waits for the socket to be ready (retries 4s/6s/9s/14s/20s) and
+// is abandoned as soon as that socket dies, because a code only works for the socket that created it.
+const pairing = { sock: null, number: '', code: '', at: 0, busy: null };
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+function getPairingCode(num) {
+  const s = sock;
+  if (!s) return Promise.reject(new Error('socket not ready'));
+  if (s.authState?.creds?.registered) return Promise.reject(new Error('already paired — delete auth_info to re-pair'));
+  if (pairing.sock === s && pairing.number === num) {
+    if (pairing.busy) return pairing.busy;
+    if (pairing.code && Date.now() - pairing.at < 120_000) return Promise.resolve(pairing.code);
+  }
+  pairing.sock = s; pairing.number = num; pairing.code = ''; pairing.at = 0;
+  pairing.busy = (async () => {
+    let lastErr;
+    for (const d of [4000, 6000, 9000, 14000, 20000]) {
+      await sleep(d);
+      if (sock !== s) throw new Error('connection restarted — press generate again');
+      if (s.authState?.creds?.registered) throw new Error('already paired');
+      try {
+        const raw = await s.requestPairingCode(num);
+        pairing.code = raw; pairing.at = Date.now();
+        log.ok('Pairing code for', num, '→', chalk.magenta.bold(raw.match(/.{1,4}/g)?.join('-') || raw));
+        return raw;
+      } catch (e) { lastErr = e; log.warn('pairing attempt failed:', e?.message || e); }
+    }
+    throw lastErr || new Error('pairing failed');
+  })().finally(() => { pairing.busy = null; });
+  return pairing.busy;
+}
+function printPairingBanner(num, raw) {
+  const pretty = raw.match(/.{1,4}/g)?.join('-') || raw;
+  console.log('\n' + chalk.magenta('═'.repeat(50)));
+  console.log(chalk.cyan.bold('  PAIRING CODE for ') + chalk.yellow(num));
+  console.log(chalk.magenta('═'.repeat(50)));
+  console.log('  ' + chalk.green.bold(pretty));
+  console.log(chalk.magenta('═'.repeat(50)));
+  console.log(chalk.cyan('  Open WhatsApp → Linked Devices → Link with phone number'));
+  console.log(chalk.magenta('═'.repeat(50)) + '\n');
+}
 // Logo served from URL — no local image needed (keeps repo size small)
 const LOGO_URL  = 'https://files.catbox.moe/zjwi4l.jpg';
 const LOGO_PATH = LOGO_URL; // passed to plugins; menu.js checks this
@@ -172,11 +218,7 @@ app.post('/pair', async (req, res) => {
     if (password && password !== WEB_PASSWORD) return res.status(401).json({ ok:false, error:'unauthorized' });
     const num = String(number || '').replace(/[^0-9]/g, '');
     if (!num) return res.status(400).json({ ok:false, error:'number required' });
-    if (!sock) return res.status(503).json({ ok:false, error:'socket not ready' });
-    if (sock.authState?.creds?.registered) return res.status(400).json({ ok:false, error:'already paired — delete auth_info to re-pair' });
-    await new Promise(r => setTimeout(r, 3000));
-    const code = await sock.requestPairingCode(num);
-    log.ok('Pairing code for', num, '→', chalk.magenta.bold(code));
+    const code = await getPairingCode(num);
     return res.json({ ok:true, code });
   } catch (e) {
     log.err('pair error', e?.message || e);
@@ -229,6 +271,10 @@ async function startSock() {
       creds: state.creds,
       keys: makeCacheableSignalKeyStore(state.keys, logger),
     },
+    browser: BROWSER,
+    connectTimeoutMs: 60_000,
+    defaultQueryTimeoutMs: 120_000,
+    keepAliveIntervalMs: 15_000,
     markOnlineOnConnect: settings.alwaysOnline,
     generateHighQualityLinkPreview: true,
     syncFullHistory: false,
@@ -238,32 +284,13 @@ async function startSock() {
 
   if (!sock.authState.creds.registered) {
     if (OWNER_NUMBER_ENV) {
-      setTimeout(async () => {
-        try {
-          const code = await sock.requestPairingCode(OWNER_NUMBER_ENV);
-          console.log('\n' + chalk.magenta('═'.repeat(50)));
-          console.log(chalk.cyan.bold('  PAIRING CODE for ') + chalk.yellow(OWNER_NUMBER_ENV));
-          console.log(chalk.magenta('═'.repeat(50)));
-          console.log('  ' + chalk.green.bold(code.match(/.{1,4}/g)?.join('-') || code));
-          console.log(chalk.magenta('═'.repeat(50)));
-          console.log(chalk.cyan('  Open WhatsApp → Linked Devices → Link with phone number'));
-          console.log(chalk.magenta('═'.repeat(50)) + '\n');
-        } catch (e) { log.err('pair error', e?.message); }
-      }, 3000);
-    } else {
+      getPairingCode(OWNER_NUMBER_ENV).then((raw) => printPairingBanner(OWNER_NUMBER_ENV, raw)).catch((e) => log.err('pair error', e?.message));
+    } else if (process.stdin.isTTY) {
       if (webServerStarted) log.info('Tip: you can also pair via the web UI at /');
       const num = await askNumberCLI();
-      if (num) {
-        await new Promise(r => setTimeout(r, 3000));
-        try {
-          const code = await sock.requestPairingCode(num);
-          console.log('\n' + chalk.magenta('═'.repeat(50)));
-          console.log(chalk.cyan.bold('  PAIRING CODE'));
-          console.log(chalk.magenta('═'.repeat(50)));
-          console.log('  ' + chalk.green.bold(code.match(/.{1,4}/g)?.join('-') || code));
-          console.log(chalk.magenta('═'.repeat(50)) + '\n');
-        } catch (e) { log.err('pair error', e?.message); }
-      }
+      if (num) getPairingCode(num).then((raw) => printPairingBanner(num, raw)).catch((e) => log.err('pair error', e?.message));
+    } else {
+      log.info('No OWNER_NUMBER set and no terminal here — open the web UI (/) to pair, or set OWNER_NUMBER in Railway variables.');
     }
   }
 
@@ -292,16 +319,22 @@ async function startSock() {
     }
     if (connection === 'close') {
       const code = lastDisconnect?.error?.output?.statusCode;
+      const wasRegistered = !!sock.authState.creds?.registered;
       log.warn('connection closed', code);
       stopAlwaysOnline();
       if (code === DisconnectReason.loggedOut) {
-        log.err('Logged out — clearing auth_info.');
+        // Logged out (or a pairing socket WhatsApp rejected): wipe the auth and start a FRESH socket so a new code
+        // can be generated. The old code exited the process here, which Railway never restarts (exit code 0).
+        log.err(wasRegistered ? 'Logged out — clearing auth_info, ready for a new pairing.' : 'Pairing socket rejected (401) — starting a fresh one.');
         try { fs.rmSync(AUTH_DIR, { recursive: true, force: true }); } catch {}
-        process.exit(0);
+        reconnectAttempt = 0;
+        setTimeout(() => startSock().catch(e => log.err('restart error', e?.message)), 5_000);
+        return;
       }
       reconnectAttempt++;
-      const delay = Math.min(60_000, 2_000 * Math.pow(2, reconnectAttempt));
-      log.conn(`reconnecting in ${Math.round(delay/1000)}s (attempt ${reconnectAttempt})`);
+      // fast, fixed retry while pairing / right after pairing succeeds (515); exponential backoff only for a linked session
+      const delay = (!wasRegistered || code === DisconnectReason.restartRequired) ? 3_000 : Math.min(60_000, 2_000 * Math.pow(2, reconnectAttempt));
+      log.conn(`reconnecting in ${Math.round(delay/1000)}s (attempt ${reconnectAttempt}, code ${code})`);
       setTimeout(() => startSock().catch(e => log.err('restart error', e?.message)), delay);
     }
   });
