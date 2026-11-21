@@ -255,7 +255,9 @@ async function askNumberCLI() {
 async function getMessage(key) {
   const m = getCachedMessage(key.remoteJid, key.id);
   if (m?.message) return m.message;
-  return proto.Message.fromObject({});
+  // Return undefined (not an empty message) when unknown: if WhatsApp asks us to re-send a message we no longer have,
+  // answering with an EMPTY message leaves the phone stuck on "Waiting for this message" forever.
+  return undefined;
 }
 
 async function startSock() {
